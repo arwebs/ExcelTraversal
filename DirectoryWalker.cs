@@ -1,7 +1,7 @@
 ﻿using System.IO.Compression;
-using System.Xml.Serialization;
-using System.Xml;
-using System.ComponentModel;
+using System.IO.Packaging;
+using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace ExcelAnalyzer
 {
@@ -9,7 +9,7 @@ namespace ExcelAnalyzer
     {
         // Process all files in the directory passed in, recurse on any directories 
         // that are found, and process the files they contain.
-        public static List<connections> ProcessDirectory(string targetDirectory)
+        public static List<MData> ProcessDirectory(string targetDirectory)
         {
             try
             {
@@ -30,34 +30,42 @@ namespace ExcelAnalyzer
             catch (Exception ex)
             {
                 Console.WriteLine($"Could not process folder {targetDirectory} - {ex.Message}");
-                return new List<connections>();
+                return new List<MData>();
             }
         }
 
-        // Insert logic for processing found files here.
-        public static connections ProcessFile(string path)
+        public static MData ProcessFile(string path)
         {
             var myId = Guid.NewGuid();
             try
             {
-                using (var archive = ZipFile.OpenRead(path))
+                const int FIELDS_LENGTH = 4;
+                using var fileStream = File.Open(path, FileMode.Open);
+                using var archive = new ZipArchive(fileStream, ZipArchiveMode.Update);
+                
+                var entry = archive.GetEntry("customXml/item1.xml");
+                if (entry == null) { return null; }
+
+                using var entryStream = entry.Open();
+                var doc = XDocument.Load(entryStream);
+                var dataMashup = Convert.FromBase64String(doc.Root.Value);
+                int packagePartsLength = BitConverter.ToUInt16(dataMashup.Skip(FIELDS_LENGTH).Take(FIELDS_LENGTH).ToArray(), 0);
+                var packageParts = dataMashup.Skip(FIELDS_LENGTH * 2).Take(packagePartsLength).ToArray();
+
+                using var packagePartsStream = new MemoryStream(packageParts);
+                using var package = Package.Open(packagePartsStream, FileMode.Open, FileAccess.Read);
+                var section = package.GetParts().FirstOrDefault(x => x.Uri.OriginalString == "/Formulas/Section1.m");
+
+                using var reader = new StreamReader(section.GetStream());
+                var query = reader.ReadToEnd();
+                Console.WriteLine(query);
+                return new MData
                 {
-                    archive.Entries
-                        .FirstOrDefault(e => e.FullName.Contains("connections.xml"))?.ExtractToFile(
-                            Path.Combine(@"C:\Temp\xl", $"{Path.GetFileNameWithoutExtension(path)}-{myId}.xml"));
-                    Console.WriteLine($"Processed file '{path}'.");
-                    if (archive.Entries
-                        .Any(e => e.FullName.Contains("connections.xml")))
-                    {
-                        var foo = DeserializeXMLFile<connections>(
-                            @$"C:\Temp\xl\{Path.GetFileNameWithoutExtension(path)}-{myId}.xml");
-                        foo.filename = path;
-                        return foo;
-                    }
-
-                    return null;
-
-                }
+                    Filename = path,
+                    QueryCount = Regex.Matches(query, Regex.Escape("shared #")).Count,
+                    Referenced = string.Join(",", GetReferencedThings(query)),
+                    //FullQuery = query
+                };
             }
             catch (Exception ex)
             {
@@ -66,81 +74,46 @@ namespace ExcelAnalyzer
             }
         }
 
-        public static T DeserializeXMLFile<T>(string file) where T : class
+        private static IEnumerable<string> GetReferencedThings(string query)
         {
-            var ser = new XmlSerializer(typeof(T));
-            using (var stream = new FileStream(file, FileMode.Open))
-            using (var reader = XmlReader.Create(stream))
+            var references = new List<string>();
+            var spl = query.Split("shared ").Where(q => q.Length > 0);
+            foreach (var part in spl)
             {
-                return (T)ser.Deserialize(reader);
+                if (part.StartsWith("section Section1;"))
+                {
+                    continue;
+                }
+                if (part.Contains("Source = Sql.Database"))
+                {
+                    references.Add("Direct DB Query");
+                } else if (part.Contains("Source = Excel.CurrentWorkbook()"))
+                {
+                    references.Add("This Workbook");
+                }
+                else if (part.Contains("Source = Excel.Workbook"))
+                {
+                    var tempString = part.Substring(part.IndexOf("File.Contents(\"") + 15);
+                    references.Add(tempString.Substring(0, tempString.IndexOf("\"")));
+                    //references.Add("Other Workbook");
+                }
+                else
+                {
+                    references.Add("Unknown");
+                    Console.WriteLine("Unknown: " + part);
+                }
             }
+            return references;
         }
 
-
-        // NOTE: Generated code may require at least .NET Framework 4.5 or .NET Core/Standard 2.0.
-        [Serializable]
-        [DesignerCategory("code")]
-        [XmlType(AnonymousType = true, Namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main")]
-        [XmlRoot(Namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main", IsNullable = false)]
-        public class connections
+        public class MData
         {
-            public string filename { get; set; }
-            [XmlElement("connection")]
-            public connectionsConnection[] connection { get; set; }
+            public string Filename { get; set; }
+            public string Referenced { get; set; }
+            public int QueryCount { get; set; }
+            //public int DbCalls { get; set; }
+            public string FullQuery { get; set; }
         }
-
         
-        [Serializable]
-        [DesignerCategory("code")]
-        [XmlType(AnonymousType = true, Namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main")]
-        public class connectionsConnection
-        {
-            
-            [System.Xml.Serialization.XmlAttribute]
-            public byte id { get; set; }
-
-            
-            [XmlAttribute]
-            public string name { get; set; }
-
-            
-            [XmlAttribute]
-            public string description { get; set; }
-
-            
-            [XmlAttribute]
-            public int type { get; set; }
-
-            
-            [XmlAttribute]
-            public int refreshedVersion { get; set; }
-
-            
-            [XmlAttribute]
-            public int minRefreshableVersion { get; set; }
-
-            public connectionsConnectionDbPr dbPr { get; set; }
-        }
-
-        
-        [Serializable]
-        [DesignerCategory("code")]
-        [XmlType(AnonymousType = true, Namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main")]
-        public class connectionsConnectionDbPr
-        {
-            
-            [XmlAttribute]
-            public string connection { get; set; }
-
-            
-            [XmlAttribute]
-            public string command { get; set; }
-
-            
-            [XmlAttribute]
-            public int commandType { get; set; }
-
-        }
-
     }
 }
